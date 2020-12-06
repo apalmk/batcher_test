@@ -13,7 +13,7 @@ from transformers import DistilBertTokenizerFast, TFDistilBertModel
 from transformers import BertTokenizerFast, TFBertModel
 
 
-def generate_dataset(fnames, max_l, hugging_face_model,voc,batch_size,unk_wi,fll):
+def generate_dataset(outputDir,lm_input_style, max_l, hugging_face_model,voc,batch_size,unk_wi,fll):
     '''
     params:
     max_l: (max length of the sentence) #should be same across all the files: take the max sentence length with some upper cap
@@ -22,9 +22,15 @@ def generate_dataset(fnames, max_l, hugging_face_model,voc,batch_size,unk_wi,fll
         voc=pickle.load(f)
 
     voc=voc['word_vocabulary']
-    dataset = tf.data.experimental.CsvDataset(filenames=fnames,
-                                          record_defaults=[tf.string]*2+[tf.int32]+[tf.int32]*(max_l-3),
-                                          header=False)
+
+    files = tf.io.matching_files(os.path.join(outputDir, lm_input_style+'*.csv'))
+    shards = tf.data.Dataset.from_tensor_slices(files)
+    dataset = shards.interleave(tf.data.TextLineDataset, cycle_length=5,num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+    defaultData = [str()]*2+[int()]+[int()]*(max_l-3)
+    # dataset = tf.data.experimental.CsvDataset(filenames=fnames,
+    #                                       record_defaults=[tf.string]*2+[tf.int32]+[tf.int32]*(max_l-3),
+    #                                       header=False)
 
     #Wrap 'encode' function inside 'tf.py_function' so that it could be used with 'map' method.
     #load huggingfae tokenizer
@@ -142,10 +148,18 @@ def generate_dataset(fnames, max_l, hugging_face_model,voc,batch_size,unk_wi,fll
         return input_embedding,target_embedding, target_word_id, role_input, target_role_input, target_role_output
 
     def encode_pyfn(target, text, target_role, *args):
+
+        # target=tf.expand_dims(target,axis=1)
+        # text=tf.expand_dims(text,axis=1)
+        # target_role=tf.expand_dims(target_role,axis=1)
+        #input_roles = tf.stack(args, axis=1) #stack all the other roles into one input roles tensor with dtype int32
+
         input_roles = tf.stack(args, axis=0) #stack all the other roles into one input roles tensor with dtype int32
+
         ie,te,twi,ri,tr,tro = tf.py_function(encode,
                                           inp=[target, text, target_role, input_roles],
                                           Tout=(tf.float32,tf.float32,tf.int32,tf.int32,tf.int32,tf.int32))
+
 
         return (
             {'input_roles': ri,
@@ -156,7 +170,9 @@ def generate_dataset(fnames, max_l, hugging_face_model,voc,batch_size,unk_wi,fll
              'w_out': twi}
         )
 
-    dataset = dataset.map(encode_pyfn).batch(batch_size)
+    #dataset = dataset.batch(batch_size).map(encode_pyfn, num_parallel_calls=tf.data.experimental.AUTOTUNE).prefetch(3)
+
+    dataset = dataset.map(lambda x: tf.io.decode_csv(x, record_defaults=defaultData),num_parallel_calls=tf.data.experimental.AUTOTUNE).map(encode_pyfn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_size).prefetch(3)
 
     return dataset
 
@@ -189,7 +205,7 @@ if __name__=='__main__':
     #use this to check, debug, and print the tensor values
     import time
 
-    train_dataset = generate_dataset(['fullsen29.csv'], 102, "distilbert","description",10,50001,0)
+    train_dataset = generate_dataset('','fullsen', 102, "distilbert","description3",10,50001,0)
 
     for i in train_dataset.take(1):
-        print(i[1]['r_out'].shape,"\n")
+        print(i)
